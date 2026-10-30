@@ -1,0 +1,6 @@
+{
+  "name": "Namma Kannada — Practical Kannada for Everyone",
+  "description": "An interactive language learning platform helping non-Kannada speakers master practical spoken Kannada through everyday Bengaluru conversations, real-life situations, personalized daily study plans, streaks, and SMTP email authentication.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
