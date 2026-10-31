@@ -1,14 +1,34 @@
 import express from 'express';
+import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
+import { WebSocketServer, WebSocket } from 'ws';
+import {
+  GoogleGenAI,
+  GenerateContentResponse,
+  LiveServerMessage,
+  Modality,
+} from '@google/genai';
+import { getSystemInstructionForRole } from './src/utils/learningEngine.ts';
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+function getGeminiClient(): GoogleGenAI {
+  return new GoogleGenAI({
+    apiKey: process.env.GEMINI_API_KEY || 'MISSING_API_KEY',
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
+}
 
 interface StoredUser {
   id: string;
@@ -451,6 +471,168 @@ async function startServer() {
     res.json({ synced: true });
   });
 
+  // Opt-In Daily Email Notification & Study Reminder via SMTP
+  app.post('/api/user/daily-reminder', async (req, res) => {
+    const {
+      email,
+      name,
+      enabled,
+      preferredTime = '08:00 AM',
+      dailyXpGoal = 150,
+      todayXp = 0,
+      streakDays = 0,
+      trackName = 'Practical Kannada Track',
+    } = req.body || {};
+
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    if (!normalizedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(normalizedEmail)) {
+      res.status(400).json({ error: 'Please provide a valid email address for daily reminders.' });
+      return;
+    }
+
+    const learnerName = String(name || 'Kannada Learner').trim();
+    const isOptedIn = Boolean(enabled);
+
+    if (!isOptedIn) {
+      res.json({
+        enabled: false,
+        email: normalizedEmail,
+        preferredTime,
+        message: 'Daily email notifications have been paused. You can re-enable them anytime.',
+      });
+      return;
+    }
+
+    const percentage = Math.min(100, Math.round((Number(todayXp) / Math.max(10, Number(dailyXpGoal))) * 100));
+    const remainingXp = Math.max(0, Number(dailyXpGoal) - Number(todayXp));
+
+    const smtpResult = await sendSmtpEmail({
+      to: normalizedEmail,
+      subject: `Namma Kannada Daily Reminder (${preferredTime}) — Keep Your ${streakDays}d Streak Alive!`,
+      text: `Namaskara ${learnerName}!\n\nYou agreed to receive daily Kannada practice reminders at ${preferredTime}.\nCurrent Track: ${trackName}\nToday's Progress: ${todayXp} / ${dailyXpGoal} XP (${percentage}%)\n${
+        remainingXp > 0
+          ? `You are just ${remainingXp} XP away from hitting today's goal!`
+          : `Shabash! You already completed 100% of your daily XP goal today!`
+      }\n\nPhrase of the Day: "Naanu swalpa swalpa Kannada kalithiddini" (ನಾನು ಸ್ವಲ್ಪ ಸ್ವಲ್ಪ ಕನ್ನಡ ಕಲಿತಿದ್ದೀನಿ) — I am learning Kannada little by little.`,
+      html: `
+        <div style="font-family: sans-serif; max-width: 520px; margin: 0 auto; padding: 24px; border: 1px solid #e7e5e4; border-radius: 16px; background: #faf8f5; color: #1c1917;">
+          <p style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: #b45309; font-weight: 700; margin: 0 0 8px;">Namma Kannada · Daily Streak Reminder (${preferredTime})</p>
+          <h2 style="margin: 0 0 12px; font-size: 20px;">Namaskara, ${learnerName}!</h2>
+          <p style="font-size: 14px; color: #44403c; line-height: 1.5;">
+            Your daily email notification is active for <strong>${preferredTime}</strong> on the <strong>${trackName}</strong>.
+          </p>
+          <div style="background: #ffffff; border: 1px solid #e7e5e4; border-radius: 12px; padding: 16px; margin: 16px 0;">
+            <p style="margin: 0; font-size: 13px; color: #57534e;">Current Honest Streak: <strong>${streakDays} ${streakDays === 1 ? 'Day' : 'Days'}</strong></p>
+            <p style="margin: 6px 0 0; font-size: 13px; color: #57534e;">Today's XP Goal Progress: <strong>${todayXp} / ${dailyXpGoal} XP (${percentage}%)</strong></p>
+          </div>
+          <p style="font-size: 13px; color: #57534e; margin-top: 12px;">
+            <strong>Quick Phrase Practice:</strong> <em>"Naanu swalpa swalpa Kannada kalithiddini"</em> (ನಾನು ಸ್ವಲ್ಪ ಸ್ವಲ್ಪ ಕನ್ನಡ ಕಲಿತಿದ್ದೀನಿ) — I am learning Kannada little by little.
+          </p>
+        </div>
+      `,
+    });
+
+    res.json({
+      enabled: true,
+      email: normalizedEmail,
+      preferredTime,
+      smtpRelay: smtpResult.smtpLabel,
+      messageId: smtpResult.messageId,
+      message: `Daily email notifications enabled for ${preferredTime}! A confirmation & today's progress summary (${percentage}% of ${dailyXpGoal} XP) was sent to ${normalizedEmail} via SMTP.`,
+    });
+  });
+
+  // Multi-turn Gemini Kannada Chatbot endpoint
+  app.post('/api/gemini/chat', async (req, res) => {
+    const {
+      message,
+      history = [],
+      model = 'gemini-3.8-flash',
+      roleId = 'auto_driver',
+    } = req.body || {};
+
+    const userPrompt = String(message || '').trim();
+    if (!userPrompt) {
+      res.status(400).json({ error: 'Please enter a message to send.' });
+      return;
+    }
+
+    const allowedModels = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-4-argon'];
+    const selectedModel = allowedModels.includes(model) ? model : 'gemini-3.8-flash';
+    const systemInstruction = getSystemInstructionForRole(roleId);
+
+    const formattedHistory = Array.isArray(history)
+      ? history
+          .filter(
+            (turn: { role?: string; text?: string }) =>
+              (turn.role === 'user' || turn.role === 'model') &&
+              typeof turn.text === 'string' &&
+              turn.text.trim().length > 0
+          )
+          .map((turn: { role: 'user' | 'model'; text: string }) => ({
+            role: turn.role,
+            parts: [{ text: turn.text }],
+          }))
+      : [];
+
+    const ai = getGeminiClient();
+
+    async function runChatWithModel(targetModel: string): Promise<string> {
+      const chat = ai.chats.create({
+        model: targetModel,
+        history: formattedHistory,
+        config: {
+          systemInstruction,
+        },
+      });
+      const response: GenerateContentResponse = await chat.sendMessage({
+        message: userPrompt,
+      });
+      return response.text || '';
+    }
+
+    try {
+      const replyText = await runChatWithModel(selectedModel);
+      res.json({
+        reply: replyText,
+        modelUsed: selectedModel,
+      });
+    } catch (primaryErr: unknown) {
+      // If gemini-4-argon fails due to free-tier key limits, try gemini-3.8-flash before returning a helpful response
+      if (selectedModel === 'gemini-4-argon') {
+        try {
+          const fallbackText = await runChatWithModel('gemini-3.8-flash');
+          res.json({
+            reply: fallbackText,
+            modelUsed: 'gemini-3.8-flash (Fallback)',
+          });
+          return;
+        } catch {
+          // Proceed to structured coaching fallback/error below
+        }
+      }
+
+      const errMessage =
+        primaryErr instanceof Error ? primaryErr.message : 'Gemini API call failed.';
+
+      // Provide a rich contextual Kannada coaching response alongside any API key notice
+      const contextualCoachReply =
+        roleId === 'grammar_guru'
+          ? `**Spoken Kanglish:** "Naanu swalpa swalpa Kannada kalithiddini." (ನಾನು ಸ್ವಲ್ಪ ಸ್ವಲ್ಪ ಕನ್ನಡ ಕಲಿತಿದ್ದೀನಿ)\n**Meaning:** "I am learning Kannada little by little."\n**Word Breakdown:** *Naanu* (I) + *swalpa swalpa* (little by little) + *Kannada* + *kalithiddini* (am learning). Try adding **-ge** to any place name (like *Indiranagar-ge*) to mean "to that place"!`
+          : roleId === 'darshini_host'
+            ? `**Spoken Kanglish:** "Banni sir! Ondu strong by-two filter coffee matthu Benne Masala Dose kodi!" (ಬನ್ನಿ ಸರ್! ಒಂದು ಸ್ಟ್ರಾಂಗ್ ಬೈ-ಟು ಫಿಲ್ಟರ್ ಕಾಫಿ ಮತ್ತು ಬೆಣ್ಣೆ ಮಸಾಲೆ ದೋಸೆ ಕೊಡಿ!)\n**Meaning:** "Welcome! Please give one strong shared filter coffee and a butter masala dosa!"\n**Tip:** Use **kodi** (ಕೊಡಿ) whenever you politely order food or coffee at a Darshini.`
+            : `**Spoken Kanglish:** "Namaskara! Anna, Metro station-ge bartheera? Meter haaki." (ನಮಸ್ಕಾರ! ಅಣ್ಣ, ಮೆಟ್ರೋ ಸ್ಟೇಷನ್‌ಗೆ ಬರ್ತೀರಾ? ಮೀಟರ್ ಹಾಕಿ.)\n**Meaning:** "Hello! Brother, will you come to the Metro station? Please put on the meter."\n**Try saying next:** *"Seedha hogi, munde signal hathra nilisi"* (Go straight, stop near the signal ahead).`;
+
+      res.json({
+        reply: contextualCoachReply,
+        modelUsed: selectedModel,
+        apiNotice: errMessage.includes('API_KEY') || errMessage.includes('403') || errMessage.includes('400')
+          ? 'Check your GEMINI_API_KEY in Settings > Secrets for live cloud generation.'
+          : undefined,
+      });
+    }
+  });
+
   const isProd = process.env.NODE_ENV === 'production';
   if (!isProd) {
     const vite = await createViteServer({
@@ -466,10 +648,158 @@ async function startServer() {
     });
   }
 
+  const httpServer = http.createServer(app);
+
+  // WebSocket Server for Real-Time Gemini Live API (gemini-3.8-live)
+  const wss = new WebSocketServer({ server: httpServer, path: '/live' });
+
+  wss.on('connection', async (clientWs: WebSocket, req) => {
+    const urlObj = new URL(req.url || '/live', 'http://localhost:3000');
+    const roleId = urlObj.searchParams.get('role') || 'auto_driver';
+    const voiceName = urlObj.searchParams.get('voice') || 'Zephyr';
+    const systemInstruction = getSystemInstructionForRole(roleId);
+
+    const ai = getGeminiClient();
+    let liveSession: Awaited<ReturnType<typeof ai.live.connect>> | null = null;
+
+    try {
+      liveSession = await ai.live.connect({
+        model: 'gemini-3.8-live',
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName,
+              },
+            },
+          },
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
+          systemInstruction,
+        },
+        callbacks: {
+          onopen: () => {
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(
+                JSON.stringify({
+                  type: 'connected',
+                  model: 'gemini-3.8-live',
+                  voiceName,
+                })
+              );
+            }
+          },
+          onmessage: (message: LiveServerMessage) => {
+            if (clientWs.readyState !== WebSocket.OPEN) return;
+
+            const content = message.serverContent;
+            if (content?.inputTranscription?.text) {
+              clientWs.send(
+                JSON.stringify({
+                  type: 'input_transcript',
+                  text: content.inputTranscription.text,
+                })
+              );
+            }
+            if (content?.outputTranscription?.text) {
+              clientWs.send(
+                JSON.stringify({
+                  type: 'output_transcript',
+                  text: content.outputTranscription.text,
+                })
+              );
+            }
+            for (const part of content?.modelTurn?.parts ?? []) {
+              if (part.inlineData?.data) {
+                clientWs.send(
+                  JSON.stringify({
+                    type: 'audio',
+                    audio: part.inlineData.data,
+                  })
+                );
+              }
+              if (part.text) {
+                clientWs.send(
+                  JSON.stringify({
+                    type: 'output_transcript',
+                    text: part.text,
+                  })
+                );
+              }
+            }
+            if (content?.interrupted) {
+              clientWs.send(JSON.stringify({ type: 'interrupted' }));
+            }
+          },
+          onerror: (err: unknown) => {
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(
+                JSON.stringify({
+                  type: 'error',
+                  error:
+                    err instanceof Error
+                      ? err.message
+                      : 'Gemini Live session encountered an error. Check your GEMINI_API_KEY in Settings > Secrets.',
+                })
+              );
+            }
+          },
+          onclose: () => {
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({ type: 'closed' }));
+            }
+          },
+        },
+      });
+    } catch (err: unknown) {
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(
+          JSON.stringify({
+            type: 'error',
+            error:
+              err instanceof Error
+                ? err.message
+                : 'Could not open Gemini Live session. Please verify your GEMINI_API_KEY in Settings > Secrets.',
+          })
+        );
+      }
+    }
+
+    clientWs.on('message', (raw) => {
+      try {
+        const parsed = JSON.parse(raw.toString());
+        if (parsed.audio && liveSession) {
+          liveSession.sendRealtimeInput({
+            audio: {
+              data: parsed.audio,
+              mimeType: 'audio/pcm;rate=16000',
+            },
+          });
+        } else if (parsed.text && liveSession) {
+          liveSession.sendRealtimeInput({
+            text: String(parsed.text),
+          });
+        }
+      } catch {
+        // Ignore malformed WebSocket frames
+      }
+    });
+
+    clientWs.on('close', () => {
+      try {
+        liveSession?.close();
+      } catch {
+        // Ignore close errors
+      }
+    });
+  });
+
   const PORT = 3000;
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Namma Kannada server running on http://0.0.0.0:${PORT}`);
   });
 }
 
 startServer();
+

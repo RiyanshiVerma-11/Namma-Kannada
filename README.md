@@ -118,6 +118,23 @@ At each turn, learners choose their Kannada response and receive immediate feedb
   - Change their **Account Password** (`POST /api/user/change-password`).
   - Inspect their transparent **Current Honest Streak**, **Spendable XP Balance**, and **Streak Protection Shield** status.
 
+### F. 60fps 2D Kannada Arcade Game: "Auto Phrase Dash — Indiranagar Run" (`src/components/KannadaArcadeGame.tsx`)
+- **Full-Viewport Game Shell**: Launches in an isolated full-viewport `<canvas>` (`Title Screen` → `Playing` → `Pause / Victory / Game Over` modal) with a bespoke inline `<svg>` title lockup and single flat control-hint line (`A/D or Arrow Keys Switch Lanes · Space Horn Boost · M Mute · Esc Pause`).
+- **World-Matched, Low-Occlusion HUD**: Keeps >85% of the playfield unobstructed (`pointer-events: none` wrapper, zero `backdrop-filter` over the active canvas) with `tabular-nums` score/combo counters and hull heart indicators.
+- **60fps Simulation & Game Feel**: Clamps frame delta time (`Math.min(rawDt, 0.05)`), triggers procedural Web Audio synth feedback (auto horn double-beep, Mysore-gold chord arpeggio on correct Kannada phrase gate, low-frequency impact thud on decoy/pothole collision), 65ms hitstop, decaying camera shake, pooled particle bursts, and squash-and-stretch. Awards **+60 XP** upon completion.
+
+### G. Real-Time Gemini Live Voice Tutor (`src/components/GeminiLiveVoiceTutor.tsx` + WebSocket `/live`)
+- Connects browser WebSockets (`/live`) to server-side `ai.live.connect({ model: "gemini-3.8-live" })`.
+- Streams 16kHz 16-bit PCM microphone audio (`audio/pcm;rate=16000`) and schedules 24kHz PCM model output audio gaplessly using `AudioBufferSourceNode.start(nextStartTime)`.
+- Supports prebuilt voices (`Zephyr`, `Puck`, `Kore`), live input/output audio transcriptions, and local Bengaluru personas (*Ramesh Anna*, *Shankaraiah*, *Prof. Nandini*, *Karthik Gowda*).
+
+### H. Multi-Turn Gemini Kannada Chatbot (`src/components/GeminiChatTutor.tsx` + `POST /api/gemini/chat`)
+- Maintains full multi-turn conversation history in a scrollable thread with role-based `systemInstruction` personas.
+- Lets learners switch dynamically between:
+  - **`gemini-3.8-flash`** for general everyday Kannada conversation and roleplay.
+  - **`gemini-3.1-flash-lite`** for fast, low-latency phrase translations and quick drills.
+  - **`gemini-4-argon`** for complex suffix morphology breakdowns (`-ge`, `-alli`, `-inda`, `-ri`, `-avare`) and cultural nuance.
+
 ---
 
 ## 4. Authentication & SMTP OTP Pipeline

@@ -2,9 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildPersonalizedPlan,
+  buildWeeklyStreakTrends,
+  calculateDailyGoalRingMetrics,
   calculateLessonCompletion,
   createFreshUserStats,
   evaluateSentenceBuilder,
+  getSystemInstructionForRole,
+  scoreArcadeGateHit,
   spendXpOnReward,
   validateEmailFormat,
   validateOtpCode,
@@ -106,3 +110,63 @@ test('validateEmailFormat and validateOtpCode enforce strict formats', () => {
   assert.equal(validateOtpCode('482910'), true);
   assert.equal(validateOtpCode('12345'), false);
 });
+
+test('scoreArcadeGateHit and getSystemInstructionForRole compute combo multipliers and tutor prompts', () => {
+  const hit1 = scoreArcadeGateHit(0, 0, 3, true);
+  assert.equal(hit1.nextCombo, 1);
+  assert.equal(hit1.nextScore, 100);
+  assert.equal(hit1.nextHull, 3);
+
+  const hit2 = scoreArcadeGateHit(hit1.nextScore, hit1.nextCombo, hit1.nextHull, true);
+  assert.equal(hit2.nextCombo, 2);
+  assert.equal(hit2.nextScore, 300);
+
+  const miss = scoreArcadeGateHit(hit2.nextScore, hit2.nextCombo, hit2.nextHull, false);
+  assert.equal(miss.nextCombo, 0);
+  assert.equal(miss.nextHull, 2);
+  assert.equal(miss.nextScore, 275);
+
+  const grammarPrompt = getSystemInstructionForRole('grammar_guru');
+  assert.equal(grammarPrompt.includes('Prof. Nandini'), true);
+});
+
+test('buildWeeklyStreakTrends calculates 7-day activity completion and consistency', () => {
+  const fresh = createFreshUserStats('2026-10-30');
+  const freshTrends = buildWeeklyStreakTrends(fresh, 150, '2026-10-30');
+  assert.equal(freshTrends.days.length, 7);
+  assert.equal(freshTrends.activeDaysCount, 0);
+  assert.equal(freshTrends.consistencyPercent, 0);
+  assert.equal(freshTrends.days[6].dayLabel, 'Today');
+
+  const activeUser: UserProgressStats = {
+    ...fresh,
+    xp: 380,
+    todayXp: 80,
+    streakDays: 3,
+    lastActiveDate: '2026-10-30',
+  };
+  const activeTrends = buildWeeklyStreakTrends(activeUser, 150, '2026-10-30');
+  assert.equal(activeTrends.activeDaysCount, 3);
+  assert.equal(activeTrends.consistencyPercent, 43);
+  assert.equal(activeTrends.days[6].xpEarned, 80);
+  assert.equal(activeTrends.days[5].xpEarned, 150);
+  assert.equal(activeTrends.days[4].xpEarned, 150);
+  assert.equal(activeTrends.days[3].xpEarned, 0);
+});
+
+test('calculateDailyGoalRingMetrics computes circular SVG progress ring offsets accurately', () => {
+  const partial = calculateDailyGoalRingMetrics(75, 150, 34);
+  assert.equal(partial.percentage, 50);
+  assert.equal(partial.remainingXp, 75);
+  assert.equal(partial.isGoalComplete, false);
+  assert.equal(partial.strokeDashoffset, Number((partial.circumference * 0.5).toFixed(2)));
+
+  const complete = calculateDailyGoalRingMetrics(180, 150, 34);
+  assert.equal(complete.percentage, 100);
+  assert.equal(complete.remainingXp, 0);
+  assert.equal(complete.isGoalComplete, true);
+  assert.equal(complete.strokeDashoffset, 0);
+});
+
+
+

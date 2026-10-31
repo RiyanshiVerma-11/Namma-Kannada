@@ -24,6 +24,11 @@ import {
   User,
   Clock,
   Zap,
+  Gamepad2,
+  Radio,
+  Bot,
+  Mail,
+  Bell,
 } from 'lucide-react';
 import { LandingPage } from './components/LandingPage';
 import { OnboardingWizard } from './components/OnboardingWizard';
@@ -32,6 +37,10 @@ import { LessonPlayer } from './components/LessonPlayer';
 import { SituationSimulator } from './components/SituationSimulator';
 import { SituationSceneIllustration } from './components/CulturalIllustrations';
 import { ProfileAndXpView, getInitials } from './components/ProfileAndXpView';
+import { KannadaArcadeGame } from './components/KannadaArcadeGame';
+import { GeminiChatTutor } from './components/GeminiChatTutor';
+import { GeminiLiveVoiceTutor } from './components/GeminiLiveVoiceTutor';
+import { StreakTrendsCard } from './components/StreakTrendsCard';
 import {
   LEARNING_UNITS,
   EVERYDAY_SITUATIONS,
@@ -41,6 +50,7 @@ import {
 } from './data/kannadaData';
 import {
   buildPersonalizedPlan,
+  calculateDailyGoalRingMetrics,
   calculateDaysSinceActive,
   calculateLessonCompletion,
   createFreshUserStats,
@@ -52,7 +62,16 @@ import {
 import { speakKannadaPhrase } from './utils/speech';
 
 type AppView = 'landing' | 'onboarding' | 'auth' | 'dashboard';
-type DashboardTab = 'learn' | 'situations' | 'phrasebook' | 'plan' | 'xp_store' | 'profile';
+type DashboardTab =
+  | 'learn'
+  | 'situations'
+  | 'arcade_game'
+  | 'live_voice'
+  | 'ai_chat'
+  | 'phrasebook'
+  | 'plan'
+  | 'xp_store'
+  | 'profile';
 
 const STORAGE_KEYS = {
   USER: 'namma_kannada_user_v2',
@@ -133,6 +152,22 @@ export default function App() {
   const [vocabSearch, setVocabSearch] = useState('');
   const [vocabCategory, setVocabCategory] = useState<string>('All');
   const [toastBanner, setToastBanner] = useState<string | null>(null);
+
+  // Opt-In Daily Email Notification state
+  const [reminderAgreed, setReminderAgreed] = useState<boolean>(false);
+  const [reminderTime, setReminderTime] = useState<string>('07:30 PM');
+  const [reminderEmail, setReminderEmail] = useState<string>(user?.email || '');
+  const [reminderSaving, setReminderSaving] = useState<boolean>(false);
+  const [reminderFeedback, setReminderFeedback] = useState<{
+    type: 'success' | 'info' | 'error';
+    text: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (user?.email && !reminderEmail) {
+      setReminderEmail(user.email);
+    }
+  }, [user?.email, reminderEmail]);
 
   useEffect(() => {
     try {
@@ -292,9 +327,62 @@ export default function App() {
   }
 
   const dailyGoalPercent = Math.min(100, Math.round((stats.todayXp / plan.dailyXpGoal) * 100));
+  const dailyRingMetrics = calculateDailyGoalRingMetrics(stats.todayXp, plan.dailyXpGoal, 32);
   const timelineAttendance = calculateDaysSinceActive(stats.lastActiveDate, getTodayIso());
   const allLessons = LEARNING_UNITS.flatMap((u) => u.lessons);
   const completedLessonsCount = stats.completedLessonIds.length;
+
+  const handleSaveDailyReminder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setReminderFeedback(null);
+    const targetEmail = (reminderEmail || user?.email || '').trim();
+    if (!targetEmail) {
+      setReminderFeedback({
+        type: 'error',
+        text: 'Please enter a valid email address to receive daily reminders.',
+      });
+      return;
+    }
+
+    setReminderSaving(true);
+    try {
+      const response = await fetch('/api/user/daily-reminder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: targetEmail,
+          name: user?.name || 'Kannada Learner',
+          enabled: reminderAgreed,
+          preferredTime: reminderTime,
+          dailyXpGoal: plan.dailyXpGoal,
+          todayXp: stats.todayXp,
+          streakDays: stats.streakDays,
+          trackName: plan.trackName,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        setReminderFeedback({
+          type: 'error',
+          text: data.error || 'Could not update daily email notification preference.',
+        });
+      } else {
+        setReminderFeedback({
+          type: reminderAgreed ? 'success' : 'info',
+          text: data.message,
+        });
+      }
+    } catch {
+      setReminderFeedback({
+        type: reminderAgreed ? 'success' : 'info',
+        text: reminderAgreed
+          ? `Daily email reminder scheduled for ${reminderTime} (${targetEmail}).`
+          : 'Daily email notifications paused.',
+      });
+    } finally {
+      setReminderSaving(false);
+    }
+  };
 
   const filteredVocab = VOCABULARY_ITEMS.filter((item) => {
     const matchesCat =
@@ -315,6 +403,21 @@ export default function App() {
     return matchesCat && matchesQuery;
   });
 
+  const handleAwardActivityXp = (xpAmount: number, reason: string) => {
+    const todayIso = getTodayIso();
+    setStats((prev) => {
+      const nextStreak = prev.streakDays === 0 ? 1 : prev.streakDays;
+      return {
+        ...prev,
+        xp: prev.xp + xpAmount,
+        todayXp: prev.todayXp + xpAmount,
+        streakDays: nextStreak,
+        lastActiveDate: todayIso,
+      };
+    });
+    setToastBanner(`+${xpAmount} XP earned! ${reason}`);
+  };
+
   const navItems: {
     id: DashboardTab;
     label: string;
@@ -323,11 +426,31 @@ export default function App() {
   }[] = [
     { id: 'learn', label: 'Learn Path', badge: `${completedLessonsCount}/${allLessons.length}`, icon: BookOpen },
     { id: 'situations', label: 'Everyday Situations', badge: `${EVERYDAY_SITUATIONS.length}`, icon: Compass },
+    { id: 'arcade_game', label: 'Auto Phrase Dash Game', badge: '+60 XP', icon: Gamepad2 },
+    { id: 'live_voice', label: 'Live Voice Tutor', badge: 'LIVE', icon: Radio },
+    { id: 'ai_chat', label: 'Gemini AI Chatbot', badge: 'AI', icon: Bot },
     { id: 'phrasebook', label: 'Phrasebook', badge: `${VOCABULARY_ITEMS.length}`, icon: Bookmark },
     { id: 'plan', label: 'Streak & Study Plan', badge: `${stats.streakDays}d`, icon: Flame },
     { id: 'xp_store', label: 'XP Rewards Store', badge: `${stats.xp} XP`, icon: Gift },
     { id: 'profile', label: 'My Profile & Security', icon: User },
   ];
+
+  // Full-Viewport 2D Arcade Game Shell (Never renders website navbars or footers while active)
+  if (activeTab === 'arcade_game') {
+    return (
+      <KannadaArcadeGame
+        showScript={showScript}
+        onCompleteGame={(xpEarned, finalScore) => {
+          handleAwardActivityXp(
+            xpEarned,
+            `Completed Indiranagar Auto Phrase Dash (Score: ${finalScore})!`
+          );
+          setActiveTab('learn');
+        }}
+        onExitGame={() => setActiveTab('learn')}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#FAF8F5] text-stone-900 flex flex-col">
@@ -724,6 +847,73 @@ export default function App() {
                 </div>
               </section>
 
+              {/* Interactive Game, Live Voice & Gemini AI Practice Hub */}
+              <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <button
+                  type="button"
+                  onClick={() => selectDashboardTab('arcade_game')}
+                  className="p-5 rounded-2xl bg-stone-900 text-white border border-stone-800 hover:border-amber-500 text-left flex flex-col justify-between gap-3 cursor-pointer transition-colors"
+                >
+                  <div className="flex items-center justify-between text-xs text-amber-400 font-semibold">
+                    <span className="inline-flex items-center gap-1.5">
+                      <Gamepad2 className="w-4 h-4" />
+                      <span>60fps Arcade Game</span>
+                    </span>
+                    <span className="font-mono-tabular">+60 XP</span>
+                  </div>
+                  <div>
+                    <p className="font-display text-base font-bold">Auto Phrase Dash</p>
+                    <p className="text-xs text-stone-300 mt-1">
+                      Steer your Bengaluru auto rickshaw into spoken Kannada phrase gates on 100ft Road.
+                    </p>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => selectDashboardTab('live_voice')}
+                  className="p-5 rounded-2xl bg-white border border-stone-200 hover:border-amber-600 text-left flex flex-col justify-between gap-3 cursor-pointer transition-colors"
+                >
+                  <div className="flex items-center justify-between text-xs text-amber-800 font-semibold">
+                    <span className="inline-flex items-center gap-1.5">
+                      <Radio className="w-4 h-4" />
+                      <span>Gemini 3.8 Live Voice</span>
+                    </span>
+                    <span className="font-mono-tabular">+25 XP</span>
+                  </div>
+                  <div>
+                    <p className="font-display text-base font-bold text-stone-900">
+                      Real-Time Voice Tutor
+                    </p>
+                    <p className="text-xs text-stone-600 mt-1">
+                      Have a low-latency spoken Kannada conversation with Ramesh Anna or Shankaraiah.
+                    </p>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => selectDashboardTab('ai_chat')}
+                  className="p-5 rounded-2xl bg-white border border-stone-200 hover:border-amber-600 text-left flex flex-col justify-between gap-3 cursor-pointer transition-colors"
+                >
+                  <div className="flex items-center justify-between text-xs text-amber-800 font-semibold">
+                    <span className="inline-flex items-center gap-1.5">
+                      <Bot className="w-4 h-4" />
+                      <span>Multi-Model AI Coach</span>
+                    </span>
+                    <span className="font-mono-tabular">+15 XP</span>
+                  </div>
+                  <div>
+                    <p className="font-display text-base font-bold text-stone-900">
+                      Gemini Kannada Chatbot
+                    </p>
+                    <p className="text-xs text-stone-600 mt-1">
+                      Practice multi-turn dialogues &amp; suffix breakdowns with Flash, Lite, or Argon.
+                    </p>
+                  </div>
+                </button>
+              </section>
+
               {/* Vertical Connected Learning Path Timeline */}
               <div className="space-y-8">
                 {LEARNING_UNITS.map((unit) => {
@@ -999,9 +1189,9 @@ export default function App() {
           {/* TAB 4: STREAK & STUDY PLAN */}
           {activeTab === 'plan' && (
             <div className="space-y-6">
-              {/* Honest Streak Status & 7-Day Tracker */}
+              {/* Honest Streak Status, Small Circular Daily XP Progress Ring & 7-Day Tracker */}
               <div className="bg-white border border-stone-200 rounded-2xl p-6 space-y-5">
-                <div className="flex items-center justify-between">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-5">
                   <div>
                     <p className="text-xs font-semibold text-amber-800">
                       Transparent Daily Habit Tracker
@@ -1015,12 +1205,62 @@ export default function App() {
                         : `Active since ${stats.joinedDate || 'today'} · Last practiced ${stats.lastActiveDate}.`}
                     </p>
                   </div>
-                  <div className="w-14 h-14 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center">
-                    <Flame
-                      className={`w-7 h-7 ${
-                        stats.streakDays > 0 ? 'fill-amber-500 text-amber-600' : 'text-stone-400'
-                      }`}
-                    />
+
+                  {/* Right Cluster: Circular Daily XP Progress Ring + Streak Flame */}
+                  <div className="flex items-center gap-4 self-start sm:self-center">
+                    {/* Small Circular Daily XP Goal Progress Ring */}
+                    <div
+                      className="flex items-center gap-3.5 px-4 py-2.5 rounded-2xl bg-[#FAF8F5] border border-stone-200"
+                      aria-label={`Daily XP Goal Progress: ${dailyRingMetrics.percentage}%`}
+                    >
+                      <div className="relative w-18 h-18 flex items-center justify-center shrink-0">
+                        <svg className="w-18 h-18 -rotate-90" viewBox="0 0 80 80">
+                          <circle
+                            cx="40"
+                            cy="40"
+                            r={dailyRingMetrics.radius}
+                            fill="transparent"
+                            stroke="#E7E5E4"
+                            strokeWidth="7"
+                          />
+                          <circle
+                            cx="40"
+                            cy="40"
+                            r={dailyRingMetrics.radius}
+                            fill="transparent"
+                            stroke={dailyRingMetrics.isGoalComplete ? '#059669' : '#D97706'}
+                            strokeWidth="7"
+                            strokeLinecap="round"
+                            strokeDasharray={dailyRingMetrics.circumference}
+                            strokeDashoffset={dailyRingMetrics.strokeDashoffset}
+                            className="transition-all duration-500"
+                          />
+                        </svg>
+                        <span className="absolute font-mono-tabular text-xs font-bold text-stone-900">
+                          {dailyRingMetrics.percentage}%
+                        </span>
+                      </div>
+
+                      <div>
+                        <p className="text-xs font-bold text-stone-900">Daily XP Goal</p>
+                        <p className="font-mono-tabular text-xs font-semibold text-amber-800 mt-0.5">
+                          {dailyRingMetrics.todayXp} / {dailyRingMetrics.dailyXpGoal} XP
+                        </p>
+                        <p className="text-[11px] text-stone-500 mt-0.5">
+                          {dailyRingMetrics.isGoalComplete
+                            ? 'Daily goal achieved!'
+                            : `${dailyRingMetrics.remainingXp} XP left today`}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="w-14 h-14 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                      <Flame
+                        className={`w-7 h-7 ${
+                          stats.streakDays > 0 ? 'fill-amber-500 text-amber-600' : 'text-stone-400'
+                        }`}
+                      />
+                    </div>
                   </div>
                 </div>
 
@@ -1044,6 +1284,13 @@ export default function App() {
                   )}
                 </div>
               </div>
+
+              {/* Streak Trends Recharts Bar Chart Card (7-Day Activity Completion & Consistency) */}
+              <StreakTrendsCard
+                stats={stats}
+                dailyXpGoal={plan.dailyXpGoal}
+                todayIso={getTodayIso()}
+              />
 
               {/* Prioritized Plan Settings */}
               <div className="bg-white border border-stone-200 rounded-2xl p-6">
@@ -1096,7 +1343,147 @@ export default function App() {
                   </div>
                 </div>
               </div>
+
+              {/* Opt-In Daily Email Notification Card (SMTP Study & Streak Reminder) */}
+              <form
+                onSubmit={handleSaveDailyReminder}
+                className="bg-white border border-stone-200 rounded-2xl p-6 space-y-5"
+              >
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-800">
+                      <Bell className="w-4 h-4" />
+                      <span>SMTP Daily Study &amp; Streak Reminder</span>
+                    </div>
+                    <h2 className="font-display text-xl font-bold text-stone-900 mt-0.5">
+                      Daily Email Notification
+                    </h2>
+                    <p className="text-xs text-stone-600 mt-0.5">
+                      Opt in to receive a daily email with your streak status, daily XP goal progress, and a spoken Kannada phrase of the day.
+                    </p>
+                  </div>
+
+                  <span
+                    className={`px-3 py-1 rounded-lg text-xs font-semibold self-start sm:self-center ${
+                      reminderAgreed
+                        ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                        : 'bg-stone-100 text-stone-600'
+                    }`}
+                  >
+                    {reminderAgreed ? `Active · ${reminderTime}` : 'Opt-In Required'}
+                  </span>
+                </div>
+
+                {/* User Consent / Agreement Checkbox */}
+                <label className="flex items-start gap-3 p-4 rounded-xl bg-[#FAF8F5] border border-stone-200 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={reminderAgreed}
+                    onChange={(e) => setReminderAgreed(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 accent-amber-700 rounded cursor-pointer"
+                  />
+                  <div>
+                    <span className="text-xs sm:text-sm font-semibold text-stone-900 block">
+                      I agree to receive a daily Kannada study &amp; streak reminder email
+                    </span>
+                    <span className="text-xs text-stone-500 block mt-0.5">
+                      We will only send one reminder per day at your chosen time via our SMTP relay, and you can uncheck this anytime.
+                    </span>
+                  </div>
+                </label>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label
+                      htmlFor="daily-reminder-email"
+                      className="block text-xs font-semibold text-stone-700 mb-1.5"
+                    >
+                      Delivery Email Address
+                    </label>
+                    <div className="relative">
+                      <Mail className="w-4 h-4 text-stone-400 absolute left-3.5 top-3.5 pointer-events-none" />
+                      <input
+                        id="daily-reminder-email"
+                        type="email"
+                        value={reminderEmail}
+                        onChange={(e) => setReminderEmail(e.target.value)}
+                        placeholder="you@example.com"
+                        className="w-full min-h-[44px] pl-10 pr-4 py-2 text-sm bg-[#FAF8F5] border border-stone-300 rounded-xl focus:outline-none focus:border-amber-700"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="daily-reminder-time"
+                      className="block text-xs font-semibold text-stone-700 mb-1.5"
+                    >
+                      Preferred Daily Reminder Time
+                    </label>
+                    <select
+                      id="daily-reminder-time"
+                      value={reminderTime}
+                      onChange={(e) => setReminderTime(e.target.value)}
+                      className="w-full min-h-[44px] px-3.5 py-2 text-sm bg-[#FAF8F5] border border-stone-300 rounded-xl focus:outline-none focus:border-amber-700"
+                    >
+                      <option value="08:00 AM">08:00 AM — Morning Commute Prep</option>
+                      <option value="01:00 PM">01:00 PM — Lunchtime Practice</option>
+                      <option value="07:30 PM">07:30 PM — Evening Streak Check</option>
+                      <option value="09:30 PM">09:30 PM — Late Streak Saver Alert</option>
+                    </select>
+                  </div>
+                </div>
+
+                {reminderFeedback && (
+                  <div
+                    role="status"
+                    className={`p-3.5 rounded-xl border text-xs flex items-center gap-2 ${
+                      reminderFeedback.type === 'success'
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                        : reminderFeedback.type === 'error'
+                          ? 'bg-red-50 border-red-200 text-red-900'
+                          : 'bg-stone-100 border-stone-200 text-stone-700'
+                    }`}
+                  >
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
+                    <span>{reminderFeedback.text}</span>
+                  </div>
+                )}
+
+                <div className="flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={reminderSaving}
+                    className="min-h-[44px] px-5 py-2.5 rounded-xl bg-amber-700 hover:bg-amber-800 text-white text-xs font-semibold inline-flex items-center gap-2 cursor-pointer transition-colors"
+                  >
+                    <Mail className="w-4 h-4" />
+                    <span>
+                      {reminderSaving
+                        ? 'Saving & Dispatching SMTP...'
+                        : reminderAgreed
+                          ? 'Save & Send Daily Reminder Confirmation'
+                          : 'Save Notification Preference'}
+                    </span>
+                  </button>
+                </div>
+              </form>
             </div>
+          )}
+
+          {/* TAB: GEMINI LIVE VOICE CONVERSATIONS (gemini-3.8-live) */}
+          {activeTab === 'live_voice' && (
+            <GeminiLiveVoiceTutor
+              showScript={showScript}
+              onAwardXp={handleAwardActivityXp}
+            />
+          )}
+
+          {/* TAB: MULTI-TURN GEMINI CHATBOT (gemini-3.8-flash / gemini-3.1-flash-lite / gemini-4-argon) */}
+          {activeTab === 'ai_chat' && (
+            <GeminiChatTutor
+              showScript={showScript}
+              onAwardXp={handleAwardActivityXp}
+            />
           )}
 
           {/* TAB 5 & 6: XP REWARDS STORE OR DEDICATED PROFILE & SECURITY */}
